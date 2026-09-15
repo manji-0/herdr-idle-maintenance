@@ -49,7 +49,7 @@ cd herdr-idle-maintenance
 ./install.sh
 ```
 
-インストーラは次の 4 つを行います。
+インストーラは次の 5 つを行います。
 
 1. `lib/*.py` を `~/.local/lib/herdr-idle-maintenance/` へ配置
 2. launchd plist を `~/Library/LaunchAgents/dev.herdr.idle-maintenance.plist` に生成して `launchctl bootstrap`
