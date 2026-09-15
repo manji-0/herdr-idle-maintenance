@@ -5,6 +5,7 @@ set -eu
 LABEL="dev.herdr.idle-maintenance"
 LIB_DIR="$HOME/.local/lib/herdr-idle-maintenance"
 DATA_DIR="$HOME/.local/share/herdr-idle-maintenance"
+CONFIG_DIR="$HOME/.config/herdr-idle-maintenance"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 PURGE=0
 
@@ -18,6 +19,8 @@ Usage: ./uninstall.sh [--purge]
 
   --purge   Also delete recorded state and generated summaries
             (~/.local/share/herdr-idle-maintenance)
+
+Prompt templates in ~/.config/herdr-idle-maintenance are never deleted.
 USAGE
 }
 
@@ -94,6 +97,10 @@ if [ "$PURGE" -eq 1 ]; then
   fi
 else
   info "kept state and summaries in $DATA_DIR (use --purge to delete)"
+fi
+
+if [ -d "$CONFIG_DIR" ]; then
+  info "kept prompt templates in $CONFIG_DIR"
 fi
 
 info "Done."

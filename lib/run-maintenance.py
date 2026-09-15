@@ -20,7 +20,52 @@ STATE_DIR = Path(os.environ.get("HERDR_IDLE_MAINTENANCE_STATE_DIR", ROOT / "stat
 SUMMARY_DIR = Path(
     os.environ.get("HERDR_IDLE_MAINTENANCE_SUMMARY_DIR", ROOT / "claude-summaries")
 ).expanduser()
+CONFIG_DIR = Path(
+    os.environ.get(
+        "HERDR_IDLE_MAINTENANCE_CONFIG_DIR", Path.home() / ".config/herdr-idle-maintenance"
+    )
+).expanduser()
 HERDR = Path(os.environ.get("HERDR_BIN", Path.home() / ".local/bin/herdr")).expanduser()
+
+# Overridable per agent. Placeholders are substituted literally, so a template
+# may contain braces of its own without breaking.
+DEFAULT_PROMPTS = {
+    "claude": (
+        "Do not compact or clear this conversation. Create a comprehensive handoff summary "
+        "of the current session and write it to this exact absolute path:\n"
+        "{summary_path}\n\n"
+        "The Markdown summary must preserve enough context for a fresh agent to continue: "
+        "the user's goal, current state, important decisions and rationale, files changed, "
+        "commands/tests and their results, unresolved problems, and concrete next steps. "
+        "After verifying the file exists, your final response must contain only that absolute "
+        "file path and no other text."
+    ),
+    "cursor": "/summarize",
+}
+
+USAGE = """Usage: run-maintenance.py [--print-prompt <agent>]
+
+With no arguments, scan recorded sessions and ask any agent that has been idle
+for HERDR_IDLE_SECONDS (default 1800) to write a handoff summary.
+
+Options:
+  --print-prompt <agent>  Print the prompt template in effect for "claude" or
+                          "cursor", after applying any override, and exit.
+  -h, --help              Show this help.
+
+Customising the prompt, in order of precedence:
+  1. HERDR_IDLE_MAINTENANCE_PROMPT_<AGENT>       inline template
+  2. HERDR_IDLE_MAINTENANCE_PROMPT_<AGENT>_FILE  path to a template file
+  3. <config dir>/prompt-<agent>.txt             default template file
+  4. the built-in template
+
+Start from the current template:
+  run-maintenance.py --print-prompt claude \\
+    > ~/.config/herdr-idle-maintenance/prompt-claude.txt
+
+Placeholders: {summary_path} {summary_dir} {agent} {session_id} {pane_id}
+              {cwd} {timestamp}
+"""
 
 
 def log(message: str) -> None:
@@ -97,21 +142,57 @@ def summary_path(state: dict) -> Path:
     return SUMMARY_DIR / f"{safe_session_id}-{timestamp}.md"
 
 
-def prompt_for(state: dict) -> str:
-    if state["agent"] == "cursor":
-        return "/summarize"
+def prompt_template(agent: str) -> str:
+    """Resolve the template for an agent: inline env, file env, config dir, built-in."""
+    env_prefix = f"HERDR_IDLE_MAINTENANCE_PROMPT_{agent.upper()}"
 
+    inline = os.environ.get(env_prefix)
+    if inline and inline.strip():
+        return inline.strip()
+
+    candidates = []
+    override = os.environ.get(f"{env_prefix}_FILE")
+    if override:
+        candidates.append((Path(override).expanduser(), True))
+    candidates.append((CONFIG_DIR / f"prompt-{agent}.txt", False))
+
+    for candidate, explicit in candidates:
+        try:
+            text = candidate.read_text(encoding="utf-8")
+        except OSError as error:
+            # A missing file in the config dir is the normal case; stay quiet.
+            if explicit:
+                log(f"cannot read prompt file {candidate} ({error}); using the default")
+            continue
+        if text.strip():
+            return text.strip()
+        log(f"prompt file {candidate} is empty; using the default")
+
+    return DEFAULT_PROMPTS[agent]
+
+
+def render_prompt(template: str, state: dict, path: Path) -> str:
+    values = {
+        "summary_path": str(path),
+        "summary_dir": str(SUMMARY_DIR),
+        "agent": str(state.get("agent") or ""),
+        "session_id": str(state.get("session_id") or ""),
+        "pane_id": str(state.get("pane_id") or ""),
+        "cwd": str(state.get("cwd") or ""),
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    }
+    for key, value in values.items():
+        template = template.replace("{" + key + "}", value)
+    return template
+
+
+def prompt_for(state: dict) -> str:
+    template = prompt_template(state["agent"])
     path = summary_path(state)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    return (
-        "Do not compact or clear this conversation. Create a comprehensive handoff summary "
-        f"of the current session and write it to this exact absolute path:\n{path}\n\n"
-        "The Markdown summary must preserve enough context for a fresh agent to continue: "
-        "the user's goal, current state, important decisions and rationale, files changed, "
-        "commands/tests and their results, unresolved problems, and concrete next steps. "
-        "After verifying the file exists, your final response must contain only that absolute "
-        "file path and no other text."
-    )
+    # Only the templates that actually name the output directory need it to exist.
+    if "{summary_path}" in template or "{summary_dir}" in template:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    return render_prompt(template, state, path)
 
 
 def run_one(path: Path, now: float) -> None:
@@ -191,7 +272,25 @@ def run_one(path: Path, now: float) -> None:
         atomic_write(path, latest)
 
 
+def print_prompt(args: list) -> int:
+    if len(args) != 1 or args[0] not in DEFAULT_PROMPTS:
+        sys.stderr.write(f"--print-prompt needs one of: {', '.join(sorted(DEFAULT_PROMPTS))}\n")
+        return 2
+    sys.stdout.write(prompt_template(args[0]) + "\n")
+    return 0
+
+
 def main() -> int:
+    args = sys.argv[1:]
+    if args:
+        if args[0] in ("-h", "--help"):
+            sys.stdout.write(USAGE)
+            return 0
+        if args[0] == "--print-prompt":
+            return print_prompt(args[1:])
+        sys.stderr.write(f"unknown option: {args[0]}\n\n{USAGE}")
+        return 2
+
     if IDLE_SECONDS <= 0 or not HERDR.is_file():
         return 0
     STATE_DIR.mkdir(parents=True, exist_ok=True)

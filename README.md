@@ -8,7 +8,7 @@
 
 このhook実装は、セッションが一定時間アイドルになった時点で、エージェント自身に引き継ぎサマリを Markdown で書かせてディスクに残します。残っていれば、新しいセッションにそのファイルを読ませるだけで再開できます。
 
-Claude Code には「圧縮も破棄もせず、指定した絶対パスにハンドオフサマリを書け」というプロンプトを送ります。Cursor には `/summarize` を送ります。
+既定では、Claude Code には「圧縮も破棄もせず、指定した絶対パスにハンドオフサマリを書け」というプロンプトを送り、Cursor には `/summarize` を送ります。どちらも[差し替えられます](#ハンドオフプロンプトを差し替える)。
 
 ## 仕組み
 
@@ -55,6 +55,7 @@ cd herdr-idle-maintenance
 2. launchd plist を `~/Library/LaunchAgents/dev.herdr.idle-maintenance.plist` に生成して `launchctl bootstrap`
 3. `~/.claude/settings.json` に `Stop` フックと、サマリ出力先への `Write` 許可を追記
 4. `~/.cursor/hooks.json` に `stop` フックを追記
+5. プロンプトテンプレートの置き場として `~/.config/herdr-idle-maintenance/` を作成
 
 設定ファイルは書き換える前に `*.bak.<timestamp>` へバックアップします。同じフックが既にあれば入れ替えるので、再実行しても重複しません。
 
@@ -107,16 +108,61 @@ cat ~/.local/share/herdr-idle-maintenance/state/*.json
 | `HERDR_BIN` | `~/.local/bin/herdr` | herdr バイナリの場所 |
 | `HERDR_IDLE_MAINTENANCE_STATE_DIR` | `~/.local/share/herdr-idle-maintenance/state` | state の出力先 |
 | `HERDR_IDLE_MAINTENANCE_SUMMARY_DIR` | `~/.local/share/herdr-idle-maintenance/claude-summaries` | サマリの出力先 |
+| `HERDR_IDLE_MAINTENANCE_CONFIG_DIR` | `~/.config/herdr-idle-maintenance` | プロンプトテンプレートの探索先 |
+| `HERDR_IDLE_MAINTENANCE_PROMPT_<AGENT>` | なし | プロンプト本文を直接指定する（`<AGENT>` は `CLAUDE` か `CURSOR`） |
+| `HERDR_IDLE_MAINTENANCE_PROMPT_<AGENT>_FILE` | なし | テンプレートファイルのパスを指定する |
 
 `HERDR_IDLE_SECONDS` に `0` 以下を渡すとワーカーは何もせず終了します。一時的に止めたいときに使えます。
 
 ## 生成されるサマリ
 
-`~/.local/share/herdr-idle-maintenance/claude-summaries/<session_id>-<timestamp>.md` に出力されます。Claude Code へ送るプロンプトでは、次の内容を残すよう指示しています。
+`~/.local/share/herdr-idle-maintenance/claude-summaries/<session_id>-<timestamp>.md` に出力されます。既定のプロンプトでは、次の内容を残すよう指示しています。
 
 目的、現在の状態、決定とその理由、変更したファイル、実行したコマンドとテストの結果、未解決の問題、次の具体的な手順です。新しいセッションに読ませて続きから作業できることを狙っています。
 
-Cursor 側は `/summarize` を送るだけなので、出力先と形式は Cursor の挙動に従います。このディレクトリには出ません。
+既定の Cursor 側は `/summarize` を送るだけなので、出力先と形式は Cursor の挙動に従います。このディレクトリには出ません。
+
+## ハンドオフプロンプトを差し替える
+
+送信するプロンプトはエージェントごとに差し替えられます。次の順で最初に見つかったものを使います。
+
+1. 環境変数 `HERDR_IDLE_MAINTENANCE_PROMPT_CLAUDE`（本文を直接指定）
+2. 環境変数 `HERDR_IDLE_MAINTENANCE_PROMPT_CLAUDE_FILE`（テンプレートファイルのパス）
+3. `~/.config/herdr-idle-maintenance/prompt-claude.txt`
+4. 組み込みの既定
+
+Cursor 側は `CLAUDE` を `CURSOR` に、`prompt-claude.txt` を `prompt-cursor.txt` に読み替えてください。
+
+普段は 3 番目のファイルを置くのが手軽です。ワーカーは launchd から起動されるため、シェルで `export` した環境変数は届きません。1 番目と 2 番目を使う場合は plist の `EnvironmentVariables` に書く必要があります。
+
+現在有効なテンプレートを書き出してから編集します。
+
+```sh
+~/.local/lib/herdr-idle-maintenance/run-maintenance.py --print-prompt claude \
+  > ~/.config/herdr-idle-maintenance/prompt-claude.txt
+```
+
+`--print-prompt` は上書きを解決したあとのテンプレートを出力するので、いま何が送られるのかの確認にも使えます。
+
+### プレースホルダ
+
+テンプレート内の次の文字列が、送信時に置換されます。
+
+| プレースホルダ | 内容 |
+| --- | --- |
+| `{summary_path}` | サマリの出力先。`<出力先ディレクトリ>/<session_id>-<timestamp>.md` |
+| `{summary_dir}` | サマリの出力先ディレクトリ |
+| `{agent}` | `claude` または `cursor` |
+| `{session_id}` | エージェントのセッション ID |
+| `{pane_id}` | Herdr のペイン ID |
+| `{cwd}` | セッションの作業ディレクトリ |
+| `{timestamp}` | 送信時刻（ISO 8601） |
+
+単純な文字列置換です。一覧に無い `{...}` はそのまま残るので、プロンプトの中に JSON の例を書いても壊れません。
+
+出力先ディレクトリを作るのは、テンプレートが `{summary_path}` か `{summary_dir}` を含むときだけです。ファイルへの書き出しを求めないプロンプトに変えた場合、空のディレクトリは増えません。
+
+テンプレートファイルが空だった場合は既定にフォールバックし、ログに 1 行残します。一時的に止めたいだけなら `HERDR_IDLE_SECONDS=0` を使ってください。
 
 ## 二重送信をどう防いでいるか
 
@@ -139,6 +185,8 @@ Cursor 側は `/summarize` を送るだけなので、出力先と形式は Curs
 ```
 
 launchd agent の解除、plist と `~/.local/lib/herdr-idle-maintenance/` の削除、フック設定の除去を行います。記録済みの state と生成済みサマリは残します。まとめて消す場合は `--purge` を付けてください。
+
+`~/.config/herdr-idle-maintenance/` に置いたプロンプトテンプレートは `--purge` でも削除しません。
 
 ## 既知の制約
 

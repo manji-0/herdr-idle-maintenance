@@ -7,6 +7,7 @@ LIB_DIR="$HOME/.local/lib/herdr-idle-maintenance"
 DATA_DIR="$HOME/.local/share/herdr-idle-maintenance"
 STATE_DIR="$DATA_DIR/state"
 SUMMARY_DIR="$DATA_DIR/claude-summaries"
+CONFIG_DIR="$HOME/.config/herdr-idle-maintenance"
 LAUNCH_AGENTS_DIR="$HOME/Library/LaunchAgents"
 PLIST="$LAUNCH_AGENTS_DIR/$LABEL.plist"
 
@@ -79,7 +80,7 @@ fi
 
 # --- watcher ---------------------------------------------------------------
 
-mkdir -p "$LIB_DIR" "$STATE_DIR" "$SUMMARY_DIR" "$LAUNCH_AGENTS_DIR"
+mkdir -p "$LIB_DIR" "$STATE_DIR" "$SUMMARY_DIR" "$CONFIG_DIR" "$LAUNCH_AGENTS_DIR"
 for script in record-stop.py run-maintenance.py; do
   [ -f "$SCRIPT_DIR/lib/$script" ] || die "missing $SCRIPT_DIR/lib/$script"
   cp "$SCRIPT_DIR/lib/$script" "$LIB_DIR/$script"
@@ -208,4 +209,8 @@ cat <<DONE
 Done. Restart any running Claude Code or Cursor session so it picks up the hook.
 Summaries land in $SUMMARY_DIR
 Watcher log: $DATA_DIR/launchd.log
+
+To use your own handoff prompt, drop a template at $CONFIG_DIR/prompt-claude.txt
+(or prompt-cursor.txt). Start from the one in effect:
+  $python_bin $LIB_DIR/run-maintenance.py --print-prompt claude > $CONFIG_DIR/prompt-claude.txt
 DONE
