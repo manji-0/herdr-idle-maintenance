@@ -10,7 +10,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Optional
 
 
 IDLE_SECONDS = int(os.environ.get("HERDR_IDLE_SECONDS", "1800"))
@@ -106,11 +106,12 @@ def strings(value: Any) -> Iterable[str]:
             yield from strings(item)
 
 
-def current_agent_matches(state: dict) -> bool:
+def agent_mismatch(state: dict) -> Optional[str]:
+    """Return why the pane should not be prompted now, or None when it is safe to send."""
     pane_id = state.get("pane_id")
     expected_agent = state.get("agent")
     if not isinstance(pane_id, str) or not isinstance(expected_agent, str):
-        return False
+        return "state has no pane_id or agent"
     try:
         result = subprocess.run(
             [str(HERDR), "agent", "get", pane_id],
@@ -120,18 +121,20 @@ def current_agent_matches(state: dict) -> bool:
             timeout=10,
         )
         payload = json.loads(result.stdout)
-    except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
-        return False
+    except subprocess.CalledProcessError as error:
+        return f"herdr agent get failed: {(error.stderr or '').strip() or error.returncode}"
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as error:
+        return f"herdr agent get failed: {error}"
 
     values = set(strings(payload))
     if expected_agent not in values:
-        return False
+        return f"pane no longer runs {expected_agent}"
     if not ({"idle", "done"} & values):
-        return False
-    session_id = state.get("session_id")
-    if isinstance(session_id, str) and session_id and session_id not in values:
-        return False
-    return True
+        return "agent is not idle or done"
+    # Herdr learns the session only from sessionStart, so it keeps a stale id after
+    # the user switches or resumes chats in the same pane. The Stop hook recorded
+    # state.session_id from this pane directly, so a mismatch is not a reason to skip.
+    return None
 
 
 def summary_path(state: dict) -> Path:
@@ -219,13 +222,18 @@ def run_one(path: Path, now: float) -> None:
         state["maintenance_started_at"] = now
         atomic_write(path, state)
 
-    if not current_agent_matches(state):
+    skip_reason = agent_mismatch(state)
+    if skip_reason is not None:
         with lock_path.open("a+", encoding="utf-8") as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             latest = load_json(path)
             if latest.get("generation") == generation:
+                # Retried every tick, so log only when the reason changes.
+                if latest.get("skip_reason") != skip_reason:
+                    log(f"skipping pane {state.get('pane_id')}: {skip_reason}")
                 latest["maintenance_generation"] = None
                 latest["handled_generation"] = None
+                latest["skip_reason"] = skip_reason
                 atomic_write(path, latest)
         return
 
@@ -266,6 +274,7 @@ def run_one(path: Path, now: float) -> None:
             return
         latest["maintenance_generation"] = None
         latest["maintenance_finished_at"] = time.time()
+        latest.pop("skip_reason", None)
         if not succeeded:
             # Retry on the next launchd tick; Herdr rejects blocked/working agents.
             latest["handled_generation"] = None

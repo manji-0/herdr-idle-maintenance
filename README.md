@@ -172,7 +172,11 @@ Cursor 側は `CLAUDE` を `CURSOR` に、`prompt-claude.txt` を `prompt-cursor
 
 **ロック** — state ごとの `.lock` と、ワーカー全体の `watcher.lock` を `flock` で押さえます。launchd の起動が重なっても 1 つしか進みません。
 
-**送信前の実機確認** — `herdr agent get` の結果に期待するエージェント名と `idle` または `done` が含まれ、かつ session_id が一致することを確認します。ペインの中身が別のものに入れ替わっていた場合は送りません。
+**送信前の実機確認** — `herdr agent get` の結果に、期待するエージェント名と `idle` または `done` が含まれることを確認します。ペインで別のエージェントが動いている場合は送りません。
+
+session_id は照合しません。Herdr がセッションを知るのは `sessionStart` フックのときだけで、同じペインでチャットを切り替えたり再開したりすると古い ID が残るためです。state の session_id は、そのペインの Stop フックが直接記録した値です。
+
+送信を見送ったときは、その理由を state の `skip_reason` に残します。理由が変わったときだけ `launchd.log` に 1 行出します。
 
 送信が失敗したときは `handled_generation` を戻すので、次の巡回で再試行します。Herdr は working / blocked のエージェントへの送信を拒否するため、作業中に割り込むことはありません。
 
